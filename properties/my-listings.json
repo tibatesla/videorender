@@ -1,0 +1,16 @@
+[
+  {
+    "outputName": "steller-bay-residence",
+    "location": "Karen, Nairobi",
+    "priceKes": "7M",
+    "priceUsd": "348,000",
+    "bedrooms": 4,
+    "description": "A refined residence with bright living spaces, generous bedrooms, and a calm connection to the surrounding neighborhood.",
+    "images": [
+      "https://res.cloudinary.com/ob31fioo/image/upload/v1787563097/chestone/properties/cfc69c4c-800c-4c2b-a672-dd0b3e0158e8/pklnwr2p6yzjvsz0ifef.jpg",
+      "https://res.cloudinary.com/ob31fioo/image/upload/v1787563087/chestone/properties/cfc69c4c-800c-4c2b-a672-dd0b3e0158e8/dhvevc0nwvwv3bzkcant.jpg",
+      "https://res.cloudinary.com/ob31fioo/image/upload/v1787563090/chestone/properties/cfc69c4c-800c-4c2b-a672-dd0b3e0158e8/stvwidhvsjkzvuju5sdu.jpg",
+      "https://res.cloudinary.com/ob31fioo/image/upload/v1787563018/chestone/properties/cfc69c4c-800c-4c2b-a672-dd0b3e0158e8/keafgcsdducovfjd60ma.jpg"
+    ]
+  }
+]

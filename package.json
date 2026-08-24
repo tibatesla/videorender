@@ -1,0 +1,13 @@
+{
+  "name": "chestone-video-generator",
+  "version": "1.0.0",
+  "description": "Generates branded Chestone Properties marketing videos from a sequence of property images using ffmpeg.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "batch": "node src/batch.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
