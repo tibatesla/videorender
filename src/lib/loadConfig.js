@@ -39,7 +39,7 @@ export function loadBaseConfig(env = process.env) {
       ? env.DESCRIPTION_MODE
       : "bottom",
     geminiApiKey: env.GEMINI_API_KEY || "",
-    geminiVisionModel: env.GEMINI_VISION_MODEL || "gemini-2.5-flash",
+    geminiVisionModel: env.GEMINI_VISION_MODEL || "gemini-3.6-flash",
     geminiTtsModel: env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts",
     geminiVoice: env.GEMINI_VOICE || "Kore",
     geminiVoiceover: env.GEMINI_VOICEOVER === "true",

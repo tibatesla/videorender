@@ -24,28 +24,37 @@ export async function generateGeminiVoiceover(cfg, imagePaths, property, runTmpD
 }
 
 async function generateDescription(cfg, imagePaths, property) {
-  const parts = [
-    {
-      text: `Write a natural, confident real-estate voice-over for this listing. Describe the visible rooms and features in the order the photos should be shown, from the first image to the last. Keep it between 45 and 75 words. Do not invent an address, dimensions, amenities, or facts that are not visible. Do not include a price or phone number; those are displayed on screen. Listing context: ${property.bedrooms || ""} bedrooms, ${property.location || ""}.`,
-    },
-  ];
+  const parts = [{
+    text: `Write a natural, confident real-estate voice-over for this listing. Describe the visible rooms and features in the order the photos should be shown, from the first image to the last. Keep it between 45 and 75 words. Do not invent an address, dimensions, amenities, or facts that are not visible. Do not include a price or phone number; those are displayed on screen. Listing context: ${property.bedrooms || ""} bedrooms, ${property.location || ""}.`,
+  }];
   for (const imagePath of imagePaths) {
-    parts.push({
-      inlineData: {
-        mimeType: mimeTypeFor(imagePath),
-        data: fs.readFileSync(imagePath).toString("base64"),
-      },
-    });
+    parts.push({ inlineData: { mimeType: mimeTypeFor(imagePath), data: fs.readFileSync(imagePath).toString("base64") } });
   }
 
-  const response = await callGemini(cfg.geminiVisionModel, cfg.geminiApiKey, {
-    contents: [{ parts }],
-  });
+  try {
+    const response = await callGemini(cfg.geminiVisionModel, cfg.geminiApiKey, { contents: [{ parts }] });
+    return extractText(response);
+  } catch (error) {
+    if (!error.retryable || imagePaths.length === 1) throw error;
+    const imageDescriptions = [];
+    for (const imagePath of imagePaths) {
+      const response = await callGemini(cfg.geminiVisionModel, cfg.geminiApiKey, {
+        contents: [{ parts: [
+          { text: "Describe the visible room or property features in this image in one concise sentence. Do not invent facts." },
+          { inlineData: { mimeType: mimeTypeFor(imagePath), data: fs.readFileSync(imagePath).toString("base64") } },
+        ] }],
+      });
+      imageDescriptions.push(extractText(response));
+    }
+    return imageDescriptions.join(" ");
+  }
+}
+
+function extractText(response) {
   const text = response.candidates?.[0]?.content?.parts?.find((part) => part.text)?.text?.trim();
   if (!text) throw new Error("Gemini returned no narration text");
   return text;
 }
-
 async function synthesizeSpeech(cfg, script) {
   const response = await callGemini(cfg.geminiTtsModel, cfg.geminiApiKey, {
     contents: [{ parts: [{ text: script }] }],
@@ -67,15 +76,20 @@ async function synthesizeSpeech(cfg, script) {
 }
 
 async function callGemini(model, apiKey, body) {
-  const response = await fetch(`${API_ROOT}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw new Error(`Gemini API returned HTTP ${response.status}`);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await fetch(`${API_ROOT}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (response.ok) return response.json();
+
+    const details = (await response.text()).replace(/\s+/g, " ").slice(0, 500);
+    const error = new Error(`Gemini API returned HTTP ${response.status}: ${details}`);
+    error.retryable = response.status >= 500 || response.status === 429;
+    if (!error.retryable || attempt === 2) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
   }
-  return response.json();
 }
 
 function mimeTypeFor(filePath) {
