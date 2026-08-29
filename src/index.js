@@ -12,6 +12,7 @@ const property = {
   priceKes: process.env.PRICE_KES || "",
   priceUsd: process.env.PRICE_USD || "",
   bedrooms: process.env.BEDROOMS || "",
+  sqm: process.env.SQM || "",
   description: process.env.DESCRIPTION || "",
   images: (process.env.IMAGES || "").split(",").map((s) => s.trim()).filter(Boolean),
 };

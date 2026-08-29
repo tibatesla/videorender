@@ -14,11 +14,11 @@ import { formatPriceLine, formatBedroomsLine, formatMetaLine, formatContactLine 
  *                            baseCfg.musicPath (local file or null) should
  *                            already be resolved once by the caller, since
  *                            it's shared across a whole batch run.
- * @param {object} property  { outputName, location, priceKes, priceUsd, bedrooms, images, contactNumber? }
+ * @param {object} property  { outputName, location, priceKes, priceUsd, bedrooms, sqm, images, contactNumber? }
  * @param {object} opts      { tmpRoot, outputDir }
  */
 export async function renderVideo(baseCfg, property, opts) {
-  const { outputName, location, priceKes, priceUsd, bedrooms, images, contactNumber, description } = property;
+  const { outputName, location, priceKes, priceUsd, bedrooms, sqm, images, contactNumber, description } = property;
   if (!outputName) throw new Error("Property is missing outputName.");
 
   const runTmpDir = path.join(opts.tmpRoot, outputName);
@@ -28,25 +28,53 @@ export async function renderVideo(baseCfg, property, opts) {
   console.log(`\n▶ ${outputName}`);
   console.log(`  downloading ${images.length} image(s)...`);
   const imagePaths = await resolveImages(images, path.join(runTmpDir, "images"));
-  const voiceoverPath = await generateGeminiVoiceover(baseCfg, imagePaths, property, runTmpDir);
-  const resolvedDescription = description || (voiceoverPath ? fs.readFileSync(path.join(runTmpDir, "text", "voiceover.txt"), "utf8") : "");
+
+  // One narration sentence + TTS clip per image (or null if voiceover is
+  // disabled/fails), so each image's on-screen time can be paced to match
+  // what's actually being said about it — see generateGeminiVoiceover.js.
+  const voiceoverClips = await generateGeminiVoiceover(baseCfg, imagePaths, property, runTmpDir);
+
+  // Per-image display duration: at least IMAGE_DURATION (readability
+  // floor), stretched to cover the spoken clip when narration for that
+  // image runs longer. Falls back to a flat IMAGE_DURATION for every
+  // image when there's no voiceover at all — identical to the old
+  // single-DUR behavior.
+  const imageDurations = voiceoverClips
+    ? imagePaths.map((_, i) => Math.max(voiceoverClips[i].duration, baseCfg.imageDuration))
+    : imagePaths.map(() => baseCfg.imageDuration);
 
   const bedroomsLine = formatBedroomsLine(bedrooms);
   const textFiles = writeTextFiles(path.join(runTmpDir, "text"), {
     brand: baseCfg.brandName,
     location: location || "",
     bedrooms: bedroomsLine,
-    meta: formatMetaLine(bedroomsLine, location || ""),
-    price: formatPriceLine(priceKes),
+    meta: formatMetaLine(bedroomsLine, location || "", sqm),
+    price: formatPriceLine(priceKes, priceUsd, baseCfg.usdRate),
     contact: formatContactLine(contactNumber || baseCfg.contactNumber),
     city: baseCfg.cityLine,
-    description: resolvedDescription,
+    description: description || "",
   });
 
-  const { inputArgs, filterComplex, totalDuration, hasLogo, imageInputCount } = buildFilterGraph(
+  const imageInputCount = imagePaths.length;
+  const hasLogo = Boolean(baseCfg.logoPath);
+  // Voiceover wavs are passed as inputs right after images + logo, so
+  // buildFilterGraph knows their ffmpeg input index for the apad+concat
+  // chain it builds internally.
+  const voiceoverInputStartIndex = imageInputCount + (hasLogo ? 1 : 0);
+
+  const { inputArgs, filterComplex, totalDuration, hasVoiceover, imageInputCount: n } = buildFilterGraph(
     imagePaths,
     baseCfg,
-    textFiles
+    textFiles,
+    {
+      imageDurations,
+      voiceover: voiceoverClips
+        ? {
+            inputStartIndex: voiceoverInputStartIndex,
+            spokenDurations: voiceoverClips.map((c) => c.duration),
+          }
+        : null,
+    }
   );
 
   fs.mkdirSync(opts.outputDir, { recursive: true });
@@ -54,35 +82,37 @@ export async function renderVideo(baseCfg, property, opts) {
 
   const args = ["-y", ...inputArgs];
 
+  // Per-image voiceover wavs, in the same order buildFilterGraph expects
+  // (right after images + logo, before music).
+  if (voiceoverClips) {
+    for (const clip of voiceoverClips) {
+      args.push("-i", clip.path);
+    }
+  }
+
   // Background music (optional, shared across the whole batch run).
   // -stream_loop -1 loops the track indefinitely so it always covers
   // the full video regardless of the source clip's length; the output
   // -t below then trims everything — video and audio — to size.
   let musicIndex = null;
   if (baseCfg.musicPath) {
-    musicIndex = imageInputCount + (hasLogo ? 1 : 0);
+    musicIndex = voiceoverInputStartIndex + (voiceoverClips ? voiceoverClips.length : 0);
     args.push("-stream_loop", "-1", "-i", baseCfg.musicPath);
   }
 
-  let voiceoverIndex = null;
-  if (voiceoverPath) {
-    voiceoverIndex = imageInputCount + (hasLogo ? 1 : 0) + (musicIndex !== null ? 1 : 0);
-    args.push("-i", voiceoverPath);
-  }
-
   let finalFilterComplex = filterComplex;
-  if (musicIndex !== null && voiceoverIndex !== null) {
+  if (musicIndex !== null && hasVoiceover) {
     finalFilterComplex +=
-      `;[${musicIndex}:a]volume=0.18[music];[${voiceoverIndex}:a]volume=1.4[voice];` +
-      "[music][voice]amix=inputs=2:duration=longest:dropout_transition=2[aout]";
+      `;[${musicIndex}:a]volume=0.18[music];[voice]volume=1.4[voiceout];` +
+      "[music][voiceout]amix=inputs=2:duration=longest:dropout_transition=2[aout]";
   }
 
   args.push("-filter_complex", finalFilterComplex, "-map", "[vout]");
 
-  if (voiceoverIndex !== null) {
+  if (hasVoiceover) {
     args.push(
       "-map",
-      musicIndex !== null ? "[aout]" : `${voiceoverIndex}:a`,
+      musicIndex !== null ? "[aout]" : "[voice]",
       "-c:a",
       "aac",
       "-b:a",

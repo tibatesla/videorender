@@ -38,6 +38,9 @@ export function loadBaseConfig(env = process.env) {
     descriptionMode: ["top", "bottom", "none"].includes(env.DESCRIPTION_MODE)
       ? env.DESCRIPTION_MODE
       : "bottom",
+    // KES→USD rate used when a property doesn't supply its own priceUsd.
+    // Override with USD_RATE in .env as the shilling moves.
+    usdRate: parseFloat(env.USD_RATE || "129"),
     geminiApiKey: env.GEMINI_API_KEY || "",
     geminiVisionModel: env.GEMINI_VISION_MODEL || "gemini-3.6-flash",
     geminiTtsModel: env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts",
@@ -49,9 +52,32 @@ export function loadBaseConfig(env = process.env) {
   };
 }
 
-/** Formats "15M" into the "Starting from KES 15M" display line. USD is dropped — it made the on-screen text too crowded. */
-export function formatPriceLine(priceKes) {
-  return `Starting from KES ${priceKes}`;
+/**
+ * Formats "15M" into the on-screen price line, e.g.
+ * "From KES 15M (~$116,000)". Trimmed from "Starting from" to "From"
+ * and USD is now included (it used to be dropped for space — that's
+ * fine now that the whole info block sits in one compact container).
+ *
+ * @param {string|number} priceKes  KES value already in millions, e.g. "15" or 15
+ * @param {number} [priceUsd]       optional precomputed USD figure; if
+ *                                   omitted, it's derived from priceKes
+ *                                   using usdRate (KES millions * 1,000,000 / rate).
+ * @param {number} [usdRate]        KES-per-USD rate, only used when priceUsd is omitted.
+ */
+export function formatPriceLine(priceKes, priceUsd, usdRate) {
+  // Strip a trailing "M" or "m" that callers sometimes include so we
+  // don't double-up and produce "17.5MM".
+  const kesRaw = String(priceKes || "").trim().replace(/m$/i, "");
+  const kesMillions = parseFloat(kesRaw);
+  const usd =
+    priceUsd !== undefined && priceUsd !== null && priceUsd !== ""
+      ? Number(priceUsd)
+      : Number.isFinite(kesMillions) && usdRate
+      ? Math.round((kesMillions * 1_000_000) / usdRate)
+      : null;
+
+  const usdSuffix = Number.isFinite(usd) ? ` (~$${usd.toLocaleString()})` : "";
+  return `From KES ${kesRaw}M${usdSuffix}`;
 }
 
 /**
@@ -66,12 +92,26 @@ export function formatBedroomsLine(bedrooms) {
 }
 
 /**
- * Combines the bedrooms line and location into one "3-Bedroom · Karen,
- * Nairobi" line, so the bottom text is two short lines (this + price)
- * instead of four stacked ones. Handles either side being blank.
+ * Formats a raw square-metre figure into "230sqm". Blank stays blank.
  */
-export function formatMetaLine(bedroomsLine, location) {
-  return [bedroomsLine, location].filter(Boolean).join(" · ");
+export function formatSqmLine(sqm) {
+  if (sqm === undefined || sqm === null || sqm === "") return "";
+  const asString = String(sqm).trim();
+  return /sqm/i.test(asString) ? asString : `${asString}sqm`;
+}
+
+/**
+ * Combines bedrooms + sqm + a SHORT location (area only, no city) into
+ * one compact line, e.g. "2-Bedroom | 230sqm | Westlands" — matching
+ * the reference layout. City is intentionally dropped here (it still
+ * lives on the outro card via cityLine) since the area name alone is
+ * enough context and saves horizontal space in the compact container.
+ * Handles any side being blank.
+ */
+export function formatMetaLine(bedroomsLine, location, sqm) {
+  const sqmLine = formatSqmLine(sqm);
+  const shortLocation = (location || "").split(",")[0].trim();
+  return [bedroomsLine, sqmLine, shortLocation].filter(Boolean).join(" | ");
 }
 
 /** Formats a raw phone number into "Call: +254 726 111133". Blank stays blank. */

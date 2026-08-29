@@ -9,21 +9,42 @@ const BRAND_WHITE = "white";
 /**
  * Builds the ffmpeg -i input args + filter_complex string for a
  * branded property slideshow: images crossfade into each other, with
- * a navy brand bar (logo + name) on top and a navy info bar on the
- * bottom (location / bedrooms / price / contact), for the full
+ * a navy brand bar (logo + name) on top and a centered info block
+ * (brand / price / bedrooms+location / contact) for the full
  * duration of the video.
  *
  * @param {string[]} imagePaths          local image files, in order
  * @param {object}   cfg                 resolved base config (loadConfig.js)
  * @param {object}   textFiles           text line names -> local .txt file paths
- * @returns {{ inputArgs: string[], filterComplex: string, totalDuration: number, hasLogo: boolean, imageInputCount: number }}
+ * @param {object}   [pacing]            optional per-image / voiceover pacing
+ * @param {number[]} pacing.imageDurations   seconds each image is shown, one
+ *                                            per image. Defaults to
+ *                                            cfg.imageDuration for every
+ *                                            image when omitted — same
+ *                                            behavior as before per-image
+ *                                            pacing existed.
+ * @param {object}   [pacing.voiceover]  when present, wires up per-image
+ *                                            narration clips as a single
+ *                                            padded+concatenated audio
+ *                                            track that lines up with each
+ *                                            image's on-screen window.
+ * @param {number}   pacing.voiceover.inputStartIndex  ffmpeg input index of
+ *                                            the FIRST voiceover wav (they
+ *                                            must be passed as consecutive
+ *                                            -i args right after this index,
+ *                                            one per image, in order).
+ * @param {number[]} pacing.voiceover.spokenDurations  actual spoken length
+ *                                            of each per-image clip, so the
+ *                                            gap up to imageDurations[i] can
+ *                                            be padded with silence.
+ * @returns {{ inputArgs: string[], filterComplex: string, totalDuration: number, hasLogo: boolean, imageInputCount: number, hasVoiceover: boolean }}
  */
-export function buildFilterGraph(imagePaths, cfg, textFiles) {
+export function buildFilterGraph(imagePaths, cfg, textFiles, pacing = {}) {
   const {
     width: W,
     height: H,
     fps: FPS,
-    imageDuration: DUR,
+    imageDuration: DEFAULT_DUR,
     transitionDuration: TRANS,
     logoPath,
     descriptionMode,
@@ -32,11 +53,28 @@ export function buildFilterGraph(imagePaths, cfg, textFiles) {
   const n = imagePaths.length;
   const hasLogo = Boolean(logoPath);
 
-  // Each image clip plays for DUR seconds "solo" plus TRANS seconds of
-  // overlap used to crossfade into the next image. A single image just
-  // plays for DUR seconds — there's nothing to transition into.
-  const clipDuration = n === 1 ? DUR : DUR + TRANS;
-  const imagesDuration = n === 1 ? DUR : DUR * (n - 1) + (DUR + TRANS);
+  const imageDurations = pacing.imageDurations || imagePaths.map(() => DEFAULT_DUR);
+  const voiceover = pacing.voiceover || null;
+  const hasVoiceover = Boolean(voiceover);
+
+  // Per-image ffmpeg input clip length: its own on-screen duration, plus
+  // a trailing overlap window for crossfading into the NEXT image (the
+  // last image doesn't need the extra tail since nothing follows it).
+  const clipDuration = imageDurations.map((d, i) => (i < n - 1 ? d + TRANS : d));
+
+  // Cumulative "solo" start time of each image — i.e. the point in the
+  // timeline where image i's crossfade-in begins. This generalizes the
+  // old `DUR * i` offset math to variable per-image durations.
+  const cumulativeStart = [0];
+  for (let i = 1; i < n; i++) {
+    cumulativeStart.push(cumulativeStart[i - 1] + imageDurations[i - 1]);
+  }
+
+  // Total time occupied by the image sequence: every image's own
+  // duration, plus one trailing TRANS for the final crossfade-out (same
+  // shape as the old DUR*(n-1) + (DUR+TRANS) formula, generalized).
+  const imagesDuration =
+    n === 1 ? imageDurations[0] : imageDurations.reduce((sum, d) => sum + d, 0) + TRANS;
 
   // After the last photo, hold on a centered logo over a navy card —
   // only when a logo is actually configured, since there'd be nothing
@@ -45,8 +83,8 @@ export function buildFilterGraph(imagePaths, cfg, textFiles) {
   const totalDuration = imagesDuration + (hasLogo ? OUTRO_DURATION : 0);
 
   const inputArgs = [];
-  imagePaths.forEach((p) => {
-    inputArgs.push("-loop", "1", "-t", String(clipDuration), "-i", p);
+  imagePaths.forEach((p, i) => {
+    inputArgs.push("-loop", "1", "-t", clipDuration[i].toFixed(3), "-i", p);
   });
   const logoInputIndex = n;
   if (hasLogo) {
@@ -55,20 +93,23 @@ export function buildFilterGraph(imagePaths, cfg, textFiles) {
 
   const filterParts = [];
 
-  // 1) Normalize every image and add a slow diagonal camera move.
+  // 1) Normalize every image and add a slow diagonal camera move, paced
+  //    to that image's own clip duration so the motion doesn't snap or
+  //    stall when durations differ image to image.
   for (let i = 0; i < n; i++) {
     const motionW = Math.ceil(W * motionScale);
     const motionH = Math.ceil(H * motionScale);
     const direction = i % 2 === 0 ? "1" : "-1";
     filterParts.push(
       `[${i}:v]scale=${motionW}:${motionH}:force_original_aspect_ratio=increase,` +
-        `crop=${W}:${H}:x='(in_w-out_w)*(0.5+${direction}*0.35*sin(2*PI*t/${clipDuration}))':` +
-        `y='(in_h-out_h)*(0.5+0.35*cos(2*PI*t/${clipDuration}))',` +
+        `crop=${W}:${H}:x='(in_w-out_w)*(0.5+${direction}*0.35*sin(2*PI*t/${clipDuration[i].toFixed(3)}))':` +
+        `y='(in_h-out_h)*(0.5+0.35*cos(2*PI*t/${clipDuration[i].toFixed(3)}))',` +
         `fps=${FPS},format=yuv420p,setsar=1[img${i}]`
     );
   }
 
-  // 2) Chain crossfades between consecutive images.
+  // 2) Chain crossfades between consecutive images, each starting at
+  //    that image's cumulative offset instead of a fixed DUR*i.
   let baseLabel;
   if (n === 1) {
     baseLabel = "img0";
@@ -76,7 +117,7 @@ export function buildFilterGraph(imagePaths, cfg, textFiles) {
     let prev = "img0";
     for (let i = 1; i < n; i++) {
       const out = i === n - 1 ? "xfaded" : `x${i}`;
-      const offset = (DUR * i).toFixed(3);
+      const offset = cumulativeStart[i].toFixed(3);
       filterParts.push(`[${prev}][img${i}]xfade=transition=fade:duration=${TRANS}:offset=${offset}[${out}]`);
       prev = out;
     }
@@ -85,10 +126,12 @@ export function buildFilterGraph(imagePaths, cfg, textFiles) {
 
   // 3) Overlay the logo (top-left), only during the intro window — it
   //    sits on the top bar, so it disappears with it and reappears
-  //    full-size in the outro card instead of floating alone.
+  //    full-size in the outro card instead of floating alone. Timed off
+  //    the FIRST image's own duration, since that's the only image the
+  //    top bar/logo are shown over.
   let afterLogoLabel = baseLabel;
+  const introDuration = Math.min(imageDurations[0], 3);
   if (hasLogo) {
-    const introDuration = Math.min(DUR, 3);
     const logoH = Math.round(H * 0.065);
     filterParts.push(`[${logoInputIndex}:v]scale=-1:${logoH}[logo]`);
     filterParts.push(`[${baseLabel}][logo]overlay=x=36:y=32:enable='lt(t\\,${introDuration})'[withlogo]`);
@@ -96,67 +139,86 @@ export function buildFilterGraph(imagePaths, cfg, textFiles) {
   }
 
   // 4) Top brand bar stays boxed (it's only up during the intro, see
-  //    below). The bottom info block is plain text over the photo, no
-  //    full-width navy bar — but each line gets its own tight,
-  //    semi-transparent backdrop (drawtext's box option) so it stays
-  //    readable no matter how light or busy the photo is underneath;
-  //    a shadow alone isn't reliable against bright patches (rugs,
-  //    walls, windows). The whole block also sits well clear of the
-  //    bottom edge, since most players (WhatsApp/IG/TikTok) draw their
-  //    own scrubber/controls over roughly the bottom ~15% of the frame.
+  //    below). The main info block — brand name / price / bedrooms+
+  //    location / contact — is now stacked around the VERTICAL CENTER
+  //    of the frame instead of hugging the bottom edge, so it lands on
+  //    the visually important middle of the shot regardless of what's
+  //    happening near the bottom (player UI, furniture, etc). Each
+  //    line still gets its own tight, semi-transparent backdrop
+  //    (drawtext's box option) so it stays readable no matter how
+  //    light or busy the photo is underneath.
   const topBarH = Math.round(H * 0.085);
-  const brandFontSize = Math.round(topBarH * 0.34);
   const brandX = hasLogo ? Math.round(H * 0.055) + 60 : 36;
 
-  const smallFontSize = Math.round(H * 0.0165);
-  const metaFontSize = Math.round(H * 0.02);
-  const priceFontSize = Math.round(H * 0.03);
-  const textBox = "box=1:boxcolor=black@0.45:boxborderw=10";
+  // Larger, cleaner fonts — premium card feel.
+  const brandFontSize = Math.round(topBarH * 0.34);
+  const blockBrandFontSize = Math.round(H * 0.020);
+  const smallFontSize = Math.round(H * 0.018);
+  const metaFontSize = Math.round(H * 0.020);
+  const priceFontSize = Math.round(H * 0.030);
 
-  // Stacked bottom-up, starting well above the bottom edge (~15% of H)
-  // so it clears player UI on WhatsApp/IG/TikTok.
-  const marginBottom = Math.round(H * 0.15);
-  const contactY = H - marginBottom - smallFontSize;
-  const metaY = contactY - Math.round(metaFontSize * 1.6);
-  const priceY = metaY - Math.round(priceFontSize * 1.4);
+  // Line height for each row in the stacked block.
+  const lineGap = 1.4;
+  const blockBrandH = Math.round(blockBrandFontSize * lineGap);
+  const priceH = Math.round(priceFontSize * lineGap);
+  const metaH = Math.round(metaFontSize * lineGap);
+  const contactH = Math.round(smallFontSize * lineGap);
+  const padding = Math.round(H * 0.022);
+
+  const blockH = padding * 2 + blockBrandH + priceH + metaH + contactH;
+  const blockW = Math.round(W * 0.76);
+  const blockX = Math.round((W - blockW) / 2);
+  const blockY = Math.round((H - blockH) / 2); // vertically centered
+
+  let cursorY = blockY + padding;
+  const brandBlockY = cursorY;
+  cursorY += blockBrandH;
+  const priceY = cursorY;
+  cursorY += priceH;
+  const metaY = cursorY;
+  cursorY += metaH;
+  const contactY = cursorY;
+
   const descriptionFontSize = Math.round(H * 0.018);
   const descriptionY = Math.round(H * 0.11);
 
-  // Top bar shows only for the first image, then disappears so the
-  // photos have the full frame for the rest of the video. Capped at 3s
-  // even if IMAGE_DURATION is longer, so it never lingers.
-  const topBarIntroDuration = Math.min(DUR, 3);
-  const topBarEnable = `lt(t\\,${topBarIntroDuration})`;
+  const topBarEnable = `lt(t\\,${introDuration})`;
+
+  // Border thickness for the card outline.
+  const borderT = 4;
 
   const chain = [
     `drawbox=x=0:y=0:w=${W}:h=${topBarH}:color=${BRAND_NAVY}:t=fill:enable='${topBarEnable}'`,
-    // Brand name — left aligned in the top bar, vertically centered.
-    // Same intro-only visibility as the bar it sits on.
     `drawtext=fontfile=${escapePathForFilter(cfg.fontHeader)}:textfile=${escapePathForFilter(
       textFiles.brand
     )}:fontsize=${brandFontSize}:fontcolor=${BRAND_WHITE}:x=${brandX}:y=(${topBarH}-text_h)/2:enable='${topBarEnable}'`,
-    // Price — the one large line, white bold, centered, no USD (was
-    // crowding the frame). Boxed for guaranteed contrast.
+
+    // Card: white fill first, then a thin dark border on top — gives the
+    // clean framed "card" look from the reference without rounded corners.
+    `drawbox=x=${blockX}:y=${blockY}:w=${blockW}:h=${blockH}:color=white@0.93:t=fill`,
+    `drawbox=x=${blockX}:y=${blockY}:w=${blockW}:h=${blockH}:color=0x222222@0.85:t=${borderT}`,
+
+    // All four lines: bold font, solid black, horizontally centered.
+    `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
+      textFiles.brand
+    )}:fontsize=${blockBrandFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${brandBlockY}`,
     `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
       textFiles.price
-    )}:fontsize=${priceFontSize}:fontcolor=${BRAND_WHITE}:x=(${W}-text_w)/2:y=${priceY}:${textBox}`,
-    // Bedrooms + location combined into one line, e.g. "3-Bedroom ·
-    // Karen, Nairobi" — white, medium, boxed.
-    `drawtext=fontfile=${escapePathForFilter(cfg.fontRegular)}:textfile=${escapePathForFilter(
+    )}:fontsize=${priceFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${priceY}`,
+    `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
       textFiles.meta
-    )}:fontsize=${metaFontSize}:fontcolor=${BRAND_WHITE}:x=(${W}-text_w)/2:y=${metaY}:${textBox}`,
-    // Contact is intentionally prominent and close to the property details.
+    )}:fontsize=${metaFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${metaY}`,
     `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
       textFiles.contact
-    )}:fontsize=${Math.round(smallFontSize * 1.25)}:fontcolor=${BRAND_GOLD}:x=(${W}-text_w)/2:y=${contactY}:${textBox}`,
+    )}:fontsize=${smallFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${contactY}`,
   ].join(",");
 
   const descriptionFilter = textFiles.description && descriptionMode !== "none"
     ? `drawtext=fontfile=${escapePathForFilter(cfg.fontRegular)}:textfile=${escapePathForFilter(
         textFiles.description
       )}:fontsize=${descriptionFontSize}:fontcolor=${BRAND_WHITE}:x=(${W}-text_w)/2:y=${
-        descriptionMode === "top" ? descriptionY : Math.round(contactY - descriptionFontSize * 2.2)
-      }:${textBox}`
+        descriptionMode === "top" ? descriptionY : Math.round(contactY + smallFontSize * 2.2)
+      }`
     : "";
   const fullChain = descriptionFilter ? `${chain},${descriptionFilter}` : chain;
 
@@ -179,6 +241,10 @@ export function buildFilterGraph(imagePaths, cfg, textFiles) {
     filterParts.push(`[${logoInputIndex}:v]scale=-1:${outroLogoH}[logooutro]`);
     filterParts.push(`[outrobg][logooutro]overlay=(W-w)/2:(H-h)/2[outrologo]`);
     const outroChain = [
+      // Outro card keeps gold contact/city on the navy background —
+      // gold reads better against solid navy than white does; this is
+      // a separate, deliberate choice from the white text used over
+      // busy photos in the main block above.
       `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
         textFiles.contact
       )}:fontsize=${Math.round(smallFontSize * 1.35)}:fontcolor=${BRAND_GOLD}:x=(${W}-text_w)/2:y=${outroContactY}`,
@@ -192,11 +258,28 @@ export function buildFilterGraph(imagePaths, cfg, textFiles) {
     filterParts.push(`[${afterLogoLabel}]${fullChain}[vout]`);
   }
 
+  // 6) Voiceover audio: one wav per image, each padded with silence up
+  //    to that image's own on-screen duration, then concatenated. This
+  //    keeps clip i's audio starting exactly at cumulativeStart[i] —
+  //    i.e. lined up with when image i actually appears — without any
+  //    separate timing/offset filter needed; sequential concat of
+  //    correctly-padded clips reproduces that timeline by construction.
+  if (hasVoiceover) {
+    for (let i = 0; i < n; i++) {
+      const inputIndex = voiceover.inputStartIndex + i;
+      const padAmount = Math.max(0, imageDurations[i] - voiceover.spokenDurations[i]);
+      filterParts.push(`[${inputIndex}:a]apad=pad_dur=${padAmount.toFixed(3)}[voice${i}]`);
+    }
+    const voiceInputs = Array.from({ length: n }, (_, i) => `[voice${i}]`).join("");
+    filterParts.push(`${voiceInputs}concat=n=${n}:v=0:a=1[voice]`);
+  }
+
   return {
     inputArgs,
     filterComplex: filterParts.join(";\n"),
     totalDuration,
     hasLogo,
+    hasVoiceover,
     imageInputCount: n,
   };
 }

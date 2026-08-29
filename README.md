@@ -104,7 +104,8 @@ Edit `properties/example-properties.json` (or make your own file):
 logo override later if you ever need one.
 
 `description` is optional and can be supplied manually. Gemini-generated
-voice-over text is used as the description when no manual description exists.
+voice-over text is used only for audio narration and is never displayed on
+the video.
 
 ```bash
 npm run batch                                  # uses properties/example-properties.json
