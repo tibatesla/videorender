@@ -27,5 +27,19 @@
       "https://res.cloudinary.com/yourcloud/image/upload/kilimani/2.jpg"
     ],
     "contactNumber": "+254 700 111222"
+  },
+  {
+    "outputName": "video-tour-muthaiga",
+    "location": "Muthaiga, Nairobi",
+    "priceKes": "85M",
+    "priceUsd": "660,000",
+    "bedrooms": 5,
+    "sqm": 540,
+    "description": "Video walkthrough of a luxurious Muthaiga estate.",
+    "clips": [
+      "./Gemeni/first.mp4",
+      "./Gemeni/second.mp4",
+      "./Gemeni/third.mp4"
+    ]
   }
 ]

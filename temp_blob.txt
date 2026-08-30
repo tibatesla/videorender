@@ -1,0 +1,203 @@
+import { escapePathForFilter } from "./ffmpegEscape.js";
+
+// Chestone brand palette — kept fixed here rather than in .env since
+// these are identity constants, not per-run settings.
+const BRAND_NAVY = "0x0B1F3B";
+const BRAND_GOLD = "0xC9A24B";
+const BRAND_WHITE = "white";
+
+/**
+ * Builds the ffmpeg -i input args + filter_complex string for a
+ * branded property slideshow: images crossfade into each other, with
+ * a navy brand bar (logo + name) on top and a navy info bar on the
+ * bottom (location / bedrooms / price / contact), for the full
+ * duration of the video.
+ *
+ * @param {string[]} imagePaths          local image files, in order
+ * @param {object}   cfg                 resolved base config (loadConfig.js)
+ * @param {object}   textFiles           text line names -> local .txt file paths
+ * @returns {{ inputArgs: string[], filterComplex: string, totalDuration: number, hasLogo: boolean, imageInputCount: number }}
+ */
+export function buildFilterGraph(imagePaths, cfg, textFiles) {
+  const {
+    width: W,
+    height: H,
+    fps: FPS,
+    imageDuration: DUR,
+    transitionDuration: TRANS,
+    logoPath,
+    descriptionMode,
+    motionScale,
+  } = cfg;
+  const n = imagePaths.length;
+  const hasLogo = Boolean(logoPath);
+
+  // Each image clip plays for DUR seconds "solo" plus TRANS seconds of
+  // overlap used to crossfade into the next image. A single image just
+  // plays for DUR seconds — there's nothing to transition into.
+  const clipDuration = n === 1 ? DUR : DUR + TRANS;
+  const imagesDuration = n === 1 ? DUR : DUR * (n - 1) + (DUR + TRANS);
+
+  // After the last photo, hold on a centered logo over a navy card —
+  // only when a logo is actually configured, since there'd be nothing
+  // to show otherwise.
+  const OUTRO_DURATION = 2;
+  const totalDuration = imagesDuration + (hasLogo ? OUTRO_DURATION : 0);
+
+  const inputArgs = [];
+  imagePaths.forEach((p) => {
+    inputArgs.push("-loop", "1", "-t", String(clipDuration), "-i", p);
+  });
+  const logoInputIndex = n;
+  if (hasLogo) {
+    inputArgs.push("-i", logoPath);
+  }
+
+  const filterParts = [];
+
+  // 1) Normalize every image and add a slow diagonal camera move.
+  for (let i = 0; i < n; i++) {
+    const motionW = Math.ceil(W * motionScale);
+    const motionH = Math.ceil(H * motionScale);
+    const direction = i % 2 === 0 ? "1" : "-1";
+    filterParts.push(
+      `[${i}:v]scale=${motionW}:${motionH}:force_original_aspect_ratio=increase,` +
+        `crop=${W}:${H}:x='(in_w-out_w)*(0.5+${direction}*0.35*sin(2*PI*t/${clipDuration}))':` +
+        `y='(in_h-out_h)*(0.5+0.35*cos(2*PI*t/${clipDuration}))',` +
+        `fps=${FPS},format=yuv420p,setsar=1[img${i}]`
+    );
+  }
+
+  // 2) Chain crossfades between consecutive images.
+  let baseLabel;
+  if (n === 1) {
+    baseLabel = "img0";
+  } else {
+    let prev = "img0";
+    for (let i = 1; i < n; i++) {
+      const out = i === n - 1 ? "xfaded" : `x${i}`;
+      const offset = (DUR * i).toFixed(3);
+      filterParts.push(`[${prev}][img${i}]xfade=transition=fade:duration=${TRANS}:offset=${offset}[${out}]`);
+      prev = out;
+    }
+    baseLabel = "xfaded";
+  }
+
+  // 3) Overlay the logo (top-left), only during the intro window — it
+  //    sits on the top bar, so it disappears with it and reappears
+  //    full-size in the outro card instead of floating alone.
+  let afterLogoLabel = baseLabel;
+  if (hasLogo) {
+    const introDuration = Math.min(DUR, 3);
+    const logoH = Math.round(H * 0.065);
+    filterParts.push(`[${logoInputIndex}:v]scale=-1:${logoH}[logo]`);
+    filterParts.push(`[${baseLabel}][logo]overlay=x=36:y=32:enable='lt(t\\,${introDuration})'[withlogo]`);
+    afterLogoLabel = "withlogo";
+  }
+
+  // 4) Top brand bar stays boxed (it's only up during the intro, see
+  //    below). The bottom info block is plain text over the photo, no
+  //    full-width navy bar — but each line gets its own tight,
+  //    semi-transparent backdrop (drawtext's box option) so it stays
+  //    readable no matter how light or busy the photo is underneath;
+  //    a shadow alone isn't reliable against bright patches (rugs,
+  //    walls, windows). The whole block also sits well clear of the
+  //    bottom edge, since most players (WhatsApp/IG/TikTok) draw their
+  //    own scrubber/controls over roughly the bottom ~15% of the frame.
+  const topBarH = Math.round(H * 0.085);
+  const brandFontSize = Math.round(topBarH * 0.34);
+  const brandX = hasLogo ? Math.round(H * 0.055) + 60 : 36;
+
+  const smallFontSize = Math.round(H * 0.0165);
+  const metaFontSize = Math.round(H * 0.02);
+  const priceFontSize = Math.round(H * 0.03);
+  const textBox = "box=1:boxcolor=black@0.45:boxborderw=10";
+
+  // Stacked bottom-up, starting well above the bottom edge (~15% of H)
+  // so it clears player UI on WhatsApp/IG/TikTok.
+  const marginBottom = Math.round(H * 0.15);
+  //const marginBottom = Math.round(H * 0.08);
+  const contactY = H - marginBottom - smallFontSize;
+  const metaY = contactY - Math.round(metaFontSize * 1.6);
+  const priceY = metaY - Math.round(priceFontSize * 1.4);
+  const descriptionFontSize = Math.round(H * 0.018);
+  const descriptionY = Math.round(H * 0.11);
+
+  // Top bar shows only for the first image, then disappears so the
+  // photos have the full frame for the rest of the video. Capped at 3s
+  // even if IMAGE_DURATION is longer, so it never lingers.
+  const topBarIntroDuration = Math.min(DUR, 3);
+  const topBarEnable = `lt(t\\,${topBarIntroDuration})`;
+
+  const chain = [
+    `drawbox=x=0:y=0:w=${W}:h=${topBarH}:color=${BRAND_NAVY}:t=fill:enable='${topBarEnable}'`,
+    // Brand name — left aligned in the top bar, vertically centered.
+    // Same intro-only visibility as the bar it sits on.
+    `drawtext=fontfile=${escapePathForFilter(cfg.fontHeader)}:textfile=${escapePathForFilter(
+      textFiles.brand
+    )}:fontsize=${brandFontSize}:fontcolor=${BRAND_WHITE}:x=${brandX}:y=(${topBarH}-text_h)/2:enable='${topBarEnable}'`,
+    // Price — the one large line, white bold, centered, no USD (was
+    // crowding the frame). Boxed for guaranteed contrast.
+    `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
+      textFiles.price
+    )}:fontsize=${priceFontSize}:fontcolor=${BRAND_WHITE}:x=(${W}-text_w)/2:y=${priceY}:${textBox}`,
+    // Bedrooms + location combined into one line, e.g. "3-Bedroom ·
+    // Karen, Nairobi" — white, medium, boxed.
+    `drawtext=fontfile=${escapePathForFilter(cfg.fontRegular)}:textfile=${escapePathForFilter(
+      textFiles.meta
+    )}:fontsize=${metaFontSize}:fontcolor=${BRAND_WHITE}:x=(${W}-text_w)/2:y=${metaY}:${textBox}`,
+    // Contact is intentionally prominent and close to the property details.
+    `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
+      textFiles.contact
+    )}:fontsize=${Math.round(smallFontSize * 1.25)}:fontcolor=${BRAND_GOLD}:x=(${W}-text_w)/2:y=${contactY}:${textBox}`,
+  ].join(",");
+
+  const descriptionFilter = textFiles.description && descriptionMode !== "none"
+    ? `drawtext=fontfile=${escapePathForFilter(cfg.fontRegular)}:textfile=${escapePathForFilter(
+        textFiles.description
+      )}:fontsize=${descriptionFontSize}:fontcolor=${BRAND_WHITE}:x=(${W}-text_w)/2:y=${
+        descriptionMode === "top" ? descriptionY : Math.round(contactY - descriptionFontSize * 2.2)
+      }:${textBox}`
+    : "";
+  const fullChain = descriptionFilter ? `${chain},${descriptionFilter}` : chain;
+
+  // 5) Outro: after all property photos, hold on a centered logo over a
+  //    plain navy card for OUTRO_DURATION seconds, with the contact
+  //    number and city underneath it. Appended after the main
+  //    bars+photos output via concat. Skipped entirely when there's no
+  //    logo (nothing to anchor the card around). Logo is sized larger
+  //    here than the small top-left mark, since this card is the one
+  //    moment it's the sole focus.
+  if (hasLogo) {
+    filterParts.push(`[${afterLogoLabel}]${fullChain}[main]`);
+    const outroLogoH = Math.round(H * 0.45);
+    const outroLogoBottom = Math.round((H + outroLogoH) / 2);
+    const outroContactY = outroLogoBottom + Math.round(H * 0.035);
+    const outroCityY = outroContactY + Math.round(H * 0.032);
+    filterParts.push(
+      `color=c=${BRAND_NAVY}:s=${W}x${H}:d=${OUTRO_DURATION}:r=${FPS},format=yuv420p,setsar=1[outrobg]`
+    );
+    filterParts.push(`[${logoInputIndex}:v]scale=-1:${outroLogoH}[logooutro]`);
+    filterParts.push(`[outrobg][logooutro]overlay=(W-w)/2:(H-h)/2[outrologo]`);
+    const outroChain = [
+      `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
+        textFiles.contact
+      )}:fontsize=${Math.round(smallFontSize * 1.35)}:fontcolor=${BRAND_GOLD}:x=(${W}-text_w)/2:y=${outroContactY}`,
+      `drawtext=fontfile=${escapePathForFilter(cfg.fontRegular)}:textfile=${escapePathForFilter(
+        textFiles.city
+      )}:fontsize=${smallFontSize}:fontcolor=${BRAND_GOLD}:x=(${W}-text_w)/2:y=${outroCityY}`,
+    ].join(",");
+    filterParts.push(`[outrologo]${outroChain}[outro]`);
+    filterParts.push(`[main][outro]concat=n=2:v=1:a=0[vout]`);
+  } else {
+    filterParts.push(`[${afterLogoLabel}]${fullChain}[vout]`);
+  }
+
+  return {
+    inputArgs,
+    filterComplex: filterParts.join(";\n"),
+    totalDuration,
+    hasLogo,
+    imageInputCount: n,
+  };
+}

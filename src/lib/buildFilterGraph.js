@@ -44,7 +44,8 @@ export function buildFilterGraph(imagePaths, cfg, textFiles, pacing = {}) {
     width: W,
     height: H,
     fps: FPS,
-    imageDuration: DEFAULT_DUR,
+    imageDuration,
+    clipTrimDuration,
     transitionDuration: TRANS,
     logoPath,
     descriptionMode,
@@ -53,6 +54,7 @@ export function buildFilterGraph(imagePaths, cfg, textFiles, pacing = {}) {
   const n = imagePaths.length;
   const hasLogo = Boolean(logoPath);
 
+  const DEFAULT_DUR = pacing.isVideoClips ? clipTrimDuration : imageDuration;
   const imageDurations = pacing.imageDurations || imagePaths.map(() => DEFAULT_DUR);
   const voiceover = pacing.voiceover || null;
   const hasVoiceover = Boolean(voiceover);
@@ -84,7 +86,11 @@ export function buildFilterGraph(imagePaths, cfg, textFiles, pacing = {}) {
 
   const inputArgs = [];
   imagePaths.forEach((p, i) => {
-    inputArgs.push("-loop", "1", "-t", clipDuration[i].toFixed(3), "-i", p);
+    if (pacing.isVideoClips) {
+      inputArgs.push("-t", clipDuration[i].toFixed(3), "-i", p);
+    } else {
+      inputArgs.push("-loop", "1", "-t", clipDuration[i].toFixed(3), "-i", p);
+    }
   });
   const logoInputIndex = n;
   if (hasLogo) {
@@ -93,19 +99,25 @@ export function buildFilterGraph(imagePaths, cfg, textFiles, pacing = {}) {
 
   const filterParts = [];
 
-  // 1) Normalize every image and add a slow diagonal camera move, paced
-  //    to that image's own clip duration so the motion doesn't snap or
-  //    stall when durations differ image to image.
+  // 1) Normalize every input to the target resolution/FPS.
+  //    For images, we add a slow diagonal camera move.
+  //    For clips, we just scale/crop to fit without distorting.
   for (let i = 0; i < n; i++) {
-    const motionW = Math.ceil(W * motionScale);
-    const motionH = Math.ceil(H * motionScale);
-    const direction = i % 2 === 0 ? "1" : "-1";
-    filterParts.push(
-      `[${i}:v]scale=${motionW}:${motionH}:force_original_aspect_ratio=increase,` +
-        `crop=${W}:${H}:x='(in_w-out_w)*(0.5+${direction}*0.35*sin(2*PI*t/${clipDuration[i].toFixed(3)}))':` +
-        `y='(in_h-out_h)*(0.5+0.35*cos(2*PI*t/${clipDuration[i].toFixed(3)}))',` +
-        `fps=${FPS},format=yuv420p,setsar=1[img${i}]`
-    );
+    if (pacing.isVideoClips) {
+      filterParts.push(
+        `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},fps=${FPS},format=yuv420p,setsar=1[img${i}]`
+      );
+    } else {
+      const motionW = Math.ceil(W * motionScale);
+      const motionH = Math.ceil(H * motionScale);
+      const direction = i % 2 === 0 ? "1" : "-1";
+      filterParts.push(
+        `[${i}:v]scale=${motionW}:${motionH}:force_original_aspect_ratio=increase,` +
+          `crop=${W}:${H}:x='(in_w-out_w)*(0.5+${direction}*0.35*sin(2*PI*t/${clipDuration[i].toFixed(3)}))':` +
+          `y='(in_h-out_h)*(0.5+0.35*cos(2*PI*t/${clipDuration[i].toFixed(3)}))',` +
+          `fps=${FPS},format=yuv420p,setsar=1[img${i}]`
+      );
+    }
   }
 
   // 2) Chain crossfades between consecutive images, each starting at
@@ -164,11 +176,10 @@ export function buildFilterGraph(imagePaths, cfg, textFiles, pacing = {}) {
   const metaH = Math.round(metaFontSize * lineGap);
   const contactH = Math.round(smallFontSize * lineGap);
   const padding = Math.round(H * 0.022);
-
   const blockH = padding * 2 + blockBrandH + priceH + metaH + contactH;
-  const blockW = Math.round(W * 0.76);
+  const blockW = Math.round(W * 0.78);
   const blockX = Math.round((W - blockW) / 2);
-  const blockY = Math.round((H - blockH) / 2); // vertically centered
+  const blockY = Math.round((H - blockH) / 2); // vertically centred
 
   let cursorY = blockY + padding;
   const brandBlockY = cursorY;
@@ -184,33 +195,32 @@ export function buildFilterGraph(imagePaths, cfg, textFiles, pacing = {}) {
 
   const topBarEnable = `lt(t\\,${introDuration})`;
 
-  // Border thickness for the card outline.
-  const borderT = 4;
-
   const chain = [
     `drawbox=x=0:y=0:w=${W}:h=${topBarH}:color=${BRAND_NAVY}:t=fill:enable='${topBarEnable}'`,
     `drawtext=fontfile=${escapePathForFilter(cfg.fontHeader)}:textfile=${escapePathForFilter(
       textFiles.brand
     )}:fontsize=${brandFontSize}:fontcolor=${BRAND_WHITE}:x=${brandX}:y=(${topBarH}-text_h)/2:enable='${topBarEnable}'`,
 
-    // Card: white fill first, then a thin dark border on top — gives the
-    // clean framed "card" look from the reference without rounded corners.
-    `drawbox=x=${blockX}:y=${blockY}:w=${blockW}:h=${blockH}:color=white@0.93:t=fill`,
-    `drawbox=x=${blockX}:y=${blockY}:w=${blockW}:h=${blockH}:color=0x222222@0.85:t=${borderT}`,
-
-    // All four lines: bold font, solid black, horizontally centered.
-    `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
-      textFiles.brand
-    )}:fontsize=${blockBrandFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${brandBlockY}`,
-    `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
-      textFiles.price
-    )}:fontsize=${priceFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${priceY}`,
-    `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
-      textFiles.meta
-    )}:fontsize=${metaFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${metaY}`,
-    `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
-      textFiles.contact
-    )}:fontsize=${smallFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${contactY}`,
+    // ── CENTRE INFO BLOCK (commented out) ──────────────────────────────
+    // Uncomment below to re-enable the white box + text overlay.
+    //
+    // // ONE box behind all four lines — white, semi-transparent, centred.
+    // `drawbox=x=${blockX}:y=${blockY}:w=${blockW}:h=${blockH}:color=white@0.88:t=fill`,
+    //
+    // // All text: bold, black — clearly readable on the white background.
+    // `drawtext=fontfile=${escapePathForFilter(cfg.fontHeader)}:textfile=${escapePathForFilter(
+    //   textFiles.brand
+    // )}:fontsize=${blockBrandFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${brandBlockY}`,
+    // `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
+    //   textFiles.price
+    // )}:fontsize=${priceFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${priceY}`,
+    // `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
+    //   textFiles.meta
+    // )}:fontsize=${metaFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${metaY}`,
+    // `drawtext=fontfile=${escapePathForFilter(cfg.fontBold)}:textfile=${escapePathForFilter(
+    //   textFiles.contact
+    // )}:fontsize=${smallFontSize}:fontcolor=black:x=(${W}-text_w)/2:y=${contactY}`,
+    // ───────────────────────────────────────────────────────────────────
   ].join(",");
 
   const descriptionFilter = textFiles.description && descriptionMode !== "none"
