@@ -128,11 +128,11 @@ PHONE_CLEAN=$(echo "${PHONE}" | tr -d '"')
 DEPOSIT_SAFE=$(echo "${DEPOSIT:-20% Deposit}" | tr -d '"' | sed 's/Deposit/Dep/g' | sed 's/%/\\\\%/g')
 
 STICKER_BOX="drawbox=x=180:y=530:w=720:h=255:color=white@0.95:t=fill"
-DRAW_S1="drawtext=fontfile='${FONT_BOLD}':text='Chestone Properties':fontcolor=black:fontsize=38:x=(w-text_w)/2:y=550"
-DRAW_S2="drawtext=fontfile='${FONT_REGULAR}':text='${LOC}':fontcolor=black:fontsize=38:x=(w-text_w)/2:y=595"
-DRAW_S3="drawtext=fontfile='${FONT_BOLD}':text='${UNIT_RANGE} | ${PRICE_RANGE}':fontcolor=black:fontsize=38:x=(w-text_w)/2:y=640"
-DRAW_S4="drawtext=fontfile='${FONT_REGULAR}':text='${DEPOSIT_SAFE} | ${BALANCE_TERMS}':fontcolor=black:fontsize=38:x=(w-text_w)/2:y=685"
-DRAW_S5="drawtext=fontfile='${FONT_BOLD}':text='Call ${PHONE_CLEAN}':fontcolor=black:fontsize=38:x=(w-text_w)/2:y=730"
+DRAW_S1="drawtext=fontfile='${FONT_BOLD}':text='Chestone Properties':fontcolor=black:fontsize=45:x=(w-text_w)/2:y=540"
+DRAW_S2="drawtext=fontfile='${FONT_BOLD}':text='${LOC}':fontcolor=black:fontsize=45:x=(w-text_w)/2:y=588"
+DRAW_S3="drawtext=fontfile='${FONT_BOLD}':text='${UNIT_RANGE} | ${PRICE_RANGE}':fontcolor=black:fontsize=45:x=(w-text_w)/2:y=636"
+DRAW_S4="drawtext=fontfile='${FONT_BOLD}':text='${DEPOSIT_SAFE} | ${BALANCE_TERMS}':fontcolor=black:fontsize=45:x=(w-text_w)/2:y=684"
+DRAW_S5="drawtext=fontfile='${FONT_BOLD}':text='Call ${PHONE_CLEAN}':fontcolor=black:fontsize=45:x=(w-text_w)/2:y=732"
 
 STICKER_FILTER="${STICKER_BOX},${DRAW_S1},${DRAW_S2},${DRAW_S3},${DRAW_S4},${DRAW_S5}"
 
